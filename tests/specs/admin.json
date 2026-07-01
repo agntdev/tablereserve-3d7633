@@ -1,0 +1,18 @@
+[
+  {
+    "name": "/admin is owner-only — non-owner sees access denied",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [
+          {
+            "method": "sendMessage",
+            "payload": {
+              "text": "Sorry, this section is for restaurant staff only.\n\nIf you're a guest, tap /start to open the menu."
+            }
+          }
+        ]
+      }
+    ]
+  }
+]
