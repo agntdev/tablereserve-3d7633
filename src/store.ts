@@ -315,7 +315,11 @@ export class PersistentStore {
     const occupiedAt = new Map<string, Set<string>>();
     for (const b of confirmed) {
       const dt = new Date(b.datetime);
-      const startM = dt.getHours() * 60 + dt.getMinutes();
+      const rawStartM = dt.getHours() * 60 + dt.getMinutes();
+      // Round DOWN to the nearest 30-min boundary so a booking at 19:15
+      // marks 19:00 as occupied — preventing a candidate at 19:00 from
+      // appearing available when the table is actually occupied from 19:15.
+      const startM = Math.floor(rawStartM / 30) * 30;
       const endM = startM + settings.seat_duration;
       for (const tid of b.tables_used) {
         for (let m = startM; m < endM; m += 30) {
@@ -362,6 +366,24 @@ export class PersistentStore {
     // Fallback: very unlikely
     return `BK-${Date.now().toString(36).toUpperCase()}`;
   }
+
+  // --- Owner notification preferences ---
+
+  async getOwnerPrefs(telegramId: number): Promise<OwnerNotificationPrefs> {
+    const raw = await this.kv.get(`owner_prefs:${telegramId}`);
+    if (raw) return JSON.parse(raw) as OwnerNotificationPrefs;
+    return { new_booking_alerts: true, daily_summary: true };
+  }
+
+  async saveOwnerPrefs(telegramId: number, prefs: OwnerNotificationPrefs): Promise<void> {
+    await this.kv.set(`owner_prefs:${telegramId}`, JSON.stringify(prefs));
+  }
+}
+
+/** Owner notification preferences. */
+export interface OwnerNotificationPrefs {
+  new_booking_alerts: boolean;
+  daily_summary: boolean;
 }
 
 // ---------------------------------------------------------------------------
