@@ -10,6 +10,7 @@ import {
 } from "../toolkit/index.js";
 import { getStore, type Booking, type OwnerNotificationPrefs } from "../store.js";
 import { todayString, dateString, daysFromNow, now } from "../clock.js";
+import { parseDateInput } from "./booking.js";
 
 // Admin is a slash command per spec, plus a main-menu button for owners who
 // are already registered.
@@ -673,5 +674,248 @@ composer.callbackQuery("admin:summary", async (ctx) => {
     ]),
   });
 });
+
+// ---------------------------------------------------------------------------
+// Edit booking flow (multi-step wizard)
+// ---------------------------------------------------------------------------
+
+composer.callbackQuery(/^admin:edit:[A-Z0-9]+$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await ensureOwner(ctx))) return;
+  const code = ctx.callbackQuery.data.replace("admin:edit:", "");
+  const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) {
+    await ctx.editMessageText("Couldn't find that booking.");
+    return;
+  }
+
+  ctx.session.adminEditCode = code;
+  enterStep(ctx, "admin:edit_field");
+
+  const msg =
+    `✏️ Editing booking ${booking.code}\n\n` +
+    `What would you like to change?`;
+
+  await ctx.editMessageText(msg, {
+    reply_markup: inlineKeyboard([
+      [inlineButton("👤 Guest name", `admin:edit_field:name:${code}`)],
+      [inlineButton("📞 Phone", `admin:edit_field:phone:${code}`)],
+      [inlineButton("👥 Party size", `admin:edit_field:party:${code}`)],
+      [inlineButton("📅 Date & time", `admin:edit_field:datetime:${code}`)],
+      [inlineButton("⬅️ Back to booking", `admin:booking:${code}`)],
+    ]),
+  });
+});
+
+// Edit field selection
+composer.callbackQuery(/^admin:edit_field:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await ensureOwner(ctx))) return;
+  const parts = ctx.callbackQuery.data.replace("admin:edit_field:", "").split(":");
+  const field = parts[0];
+  const code = parts[1];
+
+  const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) {
+    await ctx.editMessageText("Couldn't find that booking.");
+    return;
+  }
+
+  ctx.session.adminEditCode = code;
+
+  if (field === "name") {
+    enterStep(ctx, "admin:edit_name");
+    await ctx.editMessageText(
+      `Current name: ${booking.guest_name}\n\nEnter the new name:`,
+      { reply_markup: inlineKeyboard([[
+        inlineButton("⬅️ Back", `admin:edit:${code}`),
+      ]]) },
+    );
+  } else if (field === "phone") {
+    enterStep(ctx, "admin:edit_phone");
+    await ctx.editMessageText(
+      `Current phone: ${booking.phone || "—"}\n\nEnter the new phone number (or — to clear):`,
+      { reply_markup: inlineKeyboard([[
+        inlineButton("⬅️ Back", `admin:edit:${code}`),
+      ]]) },
+    );
+  } else if (field === "party") {
+    enterStep(ctx, "admin:edit_party");
+    await ctx.editMessageText(
+      `Current party size: ${booking.party_size}\n\nEnter the new party size:`,
+      { reply_markup: inlineKeyboard([[
+        inlineButton("⬅️ Back", `admin:edit:${code}`),
+      ]]) },
+    );
+  } else if (field === "datetime") {
+    enterStep(ctx, "admin:edit_date");
+    await ctx.editMessageText(
+      `Current date/time: ${booking.datetime}\n\nEnter the new date (DD/MM/YYYY):`,
+      { reply_markup: inlineKeyboard([[
+        inlineButton("⬅️ Back", `admin:edit:${code}`),
+      ]]) },
+    );
+  }
+});
+
+// Edit name handler
+composer.on("message:text", async (ctx, next) => {
+  if (ctx.session.step !== "admin:edit_name") return next();
+  const name = ctx.message.text.trim();
+  if (name.length < 1 || name.length > 100) {
+    await ctx.reply("Please enter a name between 1 and 100 characters.");
+    return;
+  }
+  const code = ctx.session.adminEditCode!;
+  const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) { await ctx.reply("Couldn't find that booking."); return; }
+  booking.guest_name = name;
+  await store.saveBooking(booking);
+  ctx.session.step = "idle";
+  await ctx.reply(`✅ Guest name updated to "${name}".`, {
+    reply_markup: inlineKeyboard([[
+      inlineButton("⬅️ Back to booking", `admin:booking:${code}`),
+    ]]),
+  });
+});
+
+// Edit phone handler
+composer.on("message:text", async (ctx, next) => {
+  if (ctx.session.step !== "admin:edit_phone") return next();
+  const phone = ctx.message.text.trim();
+  const code = ctx.session.adminEditCode!;
+  const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) { await ctx.reply("Couldn't find that booking."); return; }
+  booking.phone = phone === "—" ? "" : phone;
+  await store.saveBooking(booking);
+  ctx.session.step = "idle";
+  await ctx.reply(`✅ Phone updated.`, {
+    reply_markup: inlineKeyboard([[
+      inlineButton("⬅️ Back to booking", `admin:booking:${code}`),
+    ]]),
+  });
+});
+
+// Edit party size handler
+composer.on("message:text", async (ctx, next) => {
+  if (ctx.session.step !== "admin:edit_party") return next();
+  const n = parseInt(ctx.message.text.trim(), 10);
+  if (isNaN(n) || n < 1) {
+    await ctx.reply("Please enter a valid party size (at least 1).");
+    return;
+  }
+  const code = ctx.session.adminEditCode!;
+  const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) { await ctx.reply("Couldn't find that booking."); return; }
+  booking.party_size = n;
+  await store.saveBooking(booking);
+  ctx.session.step = "idle";
+  await ctx.reply(`✅ Party size updated to ${n}.`, {
+    reply_markup: inlineKeyboard([[
+      inlineButton("⬅️ Back to booking", `admin:booking:${code}`),
+    ]]),
+  });
+});
+
+// Edit date handler
+composer.on("message:text", async (ctx, next) => {
+  if (ctx.session.step !== "admin:edit_date") return next();
+  const text = ctx.message.text.trim();
+  const parsed = parseDateInput(text);
+  if (!parsed) {
+    await ctx.reply("Couldn't recognise that date. Please use DD/MM/YYYY format.");
+    return;
+  }
+  const dateStr = dateString(parsed);
+  ctx.session.bookingDate = dateStr;
+  enterStep(ctx, "admin:edit_time");
+  await ctx.reply("Enter the new time (HH:MM):");
+});
+
+// Edit time handler
+composer.on("message:text", async (ctx, next) => {
+  if (ctx.session.step !== "admin:edit_time") return next();
+  const text = ctx.message.text.trim();
+  const match = text.match(/^(\d{1,2})[:.](\d{2})$/);
+  if (!match) {
+    await ctx.reply("Please send the time in HH:MM format, e.g. 19:00.");
+    return;
+  }
+  let h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  if (h > 23 || m > 59) {
+    await ctx.reply("That doesn't look like a valid time. Try HH:MM, e.g. 19:00.");
+    return;
+  }
+  const timeStr = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+  const dateStr = ctx.session.bookingDate!;
+  const code = ctx.session.adminEditCode!;
+  const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) { await ctx.reply("Couldn't find that booking."); return; }
+
+  const oldDate = booking.datetime.substring(0, 10);
+  booking.datetime = `${dateStr}T${timeStr}`;
+  await store.removeBookingDateIndex(code, oldDate);
+  await store.saveBookingWithDateIndex(booking);
+  ctx.session.step = "idle";
+  await ctx.reply(`✅ Date & time updated to ${dateStr} at ${timeStr}.`, {
+    reply_markup: inlineKeyboard([[
+      inlineButton("⬅️ Back to booking", `admin:booking:${code}`),
+    ]]),
+  });
+});
+
+export async function sendDailySummaryToOwners(
+  api: { sendMessage: (chatId: number, text: string, opts?: Record<string, unknown>) => Promise<unknown> },
+): Promise<number> {
+  const store = await getStore();
+  const today = todayString();
+  const tomorrow = dateString(daysFromNow(1));
+  const bookingsToday = await store.listBookingsByDate(today);
+  const bookingsTomorrow = await store.listBookingsByDate(tomorrow);
+  const owners = await store.listOwners();
+
+  const confirmedToday = bookingsToday.filter((b) => b.status === "confirmed");
+  const confirmedTomorrow = bookingsTomorrow.filter(
+    (b) => b.status === "confirmed",
+  );
+
+  const niceToday = formatDateNice(new Date(today + "T12:00:00"));
+  const niceTomorrow = formatDateNice(new Date(tomorrow + "T12:00:00"));
+
+  let msg = `📅 Daily Summary\n\n📆 ${niceToday}: ${confirmedToday.length} booking(s)`;
+  for (const b of confirmedToday) {
+    const dt = new Date(b.datetime);
+    const hh = String(dt.getHours()).padStart(2, "0");
+    const mm = String(dt.getMinutes()).padStart(2, "0");
+    msg += `\n   ${hh}:${mm} — ${b.guest_name} (${b.party_size})`;
+  }
+  msg += `\n\n📆 ${niceTomorrow}: ${confirmedTomorrow.length} booking(s)`;
+  for (const b of confirmedTomorrow) {
+    const dt = new Date(b.datetime);
+    const hh = String(dt.getHours()).padStart(2, "0");
+    const mm = String(dt.getMinutes()).padStart(2, "0");
+    msg += `\n   ${hh}:${mm} — ${b.guest_name} (${b.party_size})`;
+  }
+
+  let sent = 0;
+  for (const owner of owners) {
+    try {
+      const prefs = await store.getOwnerPrefs(owner.telegram_id);
+      if (!prefs.daily_summary) continue;
+      await api.sendMessage(owner.telegram_id, msg);
+      sent++;
+    } catch {
+      // 403 from blocked owner — skip silently
+    }
+  }
+  return sent;
+}
 
 export default composer;

@@ -19,6 +19,7 @@ export interface Session {
   rescheduleCode?: string;
   // Admin flow data
   adminTableName?: string;
+  adminEditCode?: string;
 }
 
 export type Ctx = BotContext<Session>;

@@ -87,5 +87,24 @@
         ]
       }
     ]
+  },
+  {
+    "name": "edit booking shows field selection for non-existent booking",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [{ "method": "sendMessage" }]
+      },
+      {
+        "send": { "callback": "admin:edit:FAKE999" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "Couldn't find that booking." }
+          }
+        ]
+      }
+    ]
   }
 ]
