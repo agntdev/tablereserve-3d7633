@@ -31,7 +31,7 @@ function formatDateNice(d: Date): string {
   return `${d.getDate()} ${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-function parseDateInput(text: string): Date | null {
+export function parseDateInput(text: string): Date | null {
   const t = text.trim();
   // DD/MM or DD/MM/YYYY
   const parts = t.split(/[/\-.]/);
@@ -693,11 +693,24 @@ composer.callbackQuery(/^booking:reschedule_slot:/, async (ctx) => {
   }
 
   const freeTable = suitable.find((t) => !occupiedTables.has(t.id));
+  if (!freeTable) {
+    await ctx.editMessageText(
+      "Sorry, that time slot is no longer available. Please try another time or date.",
+      {
+        reply_markup: inlineKeyboard([
+          [inlineButton("📅 Book a table", "booking:start")],
+          [inlineButton("⬅️ Back to time selection", "booking:reschedule_date")],
+        ]),
+      },
+    );
+    ctx.session.step = "idle";
+    return;
+  }
 
-  const freeTableName = freeTable ? freeTable.name : (suitable.length > 0 ? suitable[0].name : "");
+  const freeTableName = freeTable.name;
   booking.datetime = `${date}T${time}`;
   booking.status = "confirmed";
-  booking.tables_used = freeTable ? [freeTable.id] : (suitable.length > 0 ? [suitable[0].id] : []);
+  booking.tables_used = [freeTable.id];
   // Clear reminded_at so the reminder sweep re-evaluates the new datetime
   booking.reminded_at = undefined;
   // Remove old date index before saving with new date index
