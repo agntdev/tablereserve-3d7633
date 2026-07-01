@@ -14,11 +14,4 @@ composer.command("cancel", async (ctx) => {
   });
 });
 
-// Flow timeout sweeper — if a flow step has no activity for 10 minutes, reset.
-composer.use(async (ctx, next) => {
-  // Only check timeout for flows that have a step set
-  // (every handler sets step, so context.session is initialised).
-  return next();
-});
-
 export default composer;

@@ -1,6 +1,7 @@
 import { Composer } from "grammy";
 import { readdirSync } from "node:fs";
 import { createBot, type BotContext } from "./toolkit/index.js";
+import { now } from "./clock.js";
 
 // Per-chat ephemeral conversation state. Durable domain data (bookings,
 // settings, tables, owner accounts) lives in PersistentStore (src/store.ts).
@@ -28,7 +29,7 @@ const FLOW_TTL_MS = 10 * 60 * 1000;
 /** Set the session step and a flow timeout. */
 export function enterStep(ctx: Ctx, step: string): void {
   ctx.session.step = step;
-  ctx.session.expiresAt = Date.now() + FLOW_TTL_MS;
+  ctx.session.expiresAt = now().getTime() + FLOW_TTL_MS;
 }
 
 /** Text shown when a flow times out. */
@@ -47,7 +48,7 @@ export async function buildBot(token: string) {
 
   // Flow timeout sweeper — resets expired flows before any handler runs.
   bot.use(async (ctx, next) => {
-    if (ctx.session.expiresAt && Date.now() > ctx.session.expiresAt && ctx.session.step && ctx.session.step !== "idle") {
+    if (ctx.session.expiresAt && now().getTime() > ctx.session.expiresAt && ctx.session.step && ctx.session.step !== "idle") {
       ctx.session.step = "idle";
       ctx.session.expiresAt = undefined;
       await ctx.reply(FLOW_TIMEOUT_TEXT);

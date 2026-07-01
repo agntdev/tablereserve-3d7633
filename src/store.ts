@@ -38,6 +38,8 @@ export interface Booking {
   user_id?: number;
   /** Chat id for sending reminders */
   chat_id?: number;
+  /** Timestamp (ISO string) when the reminder was last sent; undefined = never */
+  reminded_at?: string;
 }
 
 export interface OwnerAccount {
@@ -425,10 +427,17 @@ export async function getStore(): Promise<PersistentStore> {
 }
 
 async function seedDefaults(store: PersistentStore): Promise<void> {
-  // Seed default owner if none exists (telegram_id=1 is the test harness user)
+  // Seed default owner if none exists. In production, use OWNER_TELEGRAM_ID env
+  // var (the deployer sets this to the restaurant owner's Telegram user id).
+  // In test/dev, telegram_id=1 is the test harness user.
   const owners = await store.listOwners();
   if (owners.length === 0) {
-    await store.saveOwner({ telegram_id: 1, permissions: ["admin"] });
+    const ownerTelegramId = process.env.OWNER_TELEGRAM_ID
+      ? parseInt(process.env.OWNER_TELEGRAM_ID, 10)
+      : 1;
+    if (!isNaN(ownerTelegramId)) {
+      await store.saveOwner({ telegram_id: ownerTelegramId, permissions: ["admin"] });
+    }
   }
 
   // Seed default tables if none exist

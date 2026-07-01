@@ -318,6 +318,30 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
   const phone = ctx.session.bookingPhone ?? "";
   const store = await getStore();
 
+  // Re-validate the slot is still available (prevents double-booking from
+  // concurrent requests that validated earlier in the flow).
+  const slots = await store.findAvailableSlots(date, size);
+  const slotMinutes =
+    parseInt(time.split(":")[0], 10) * 60 +
+    parseInt(time.split(":")[1], 10);
+  const valid = slots.some((s) => {
+    const [sh, sm] = s.split(":").map(Number);
+    return sh * 60 + sm === slotMinutes;
+  });
+
+  if (!valid) {
+    await ctx.reply(
+      "Sorry, that time slot is no longer available. Please start a new booking.",
+      {
+        reply_markup: inlineKeyboard([
+          [inlineButton("📅 Book a table", "booking:start")],
+        ]),
+      },
+    );
+    ctx.session.step = "idle";
+    return;
+  }
+
   // Generate booking code
   const code = await store.generateBookingCode();
 
@@ -333,12 +357,40 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
     chat_id: ctx.chat?.id,
   };
 
-  // Assign a suitable table before saving
+  // Assign a suitable table by checking what's actually free at this time
+  const settings = await store.getDefaultSettings();
   const tables = await store.listTables();
   const suitable = tables
     .filter((t) => t.capacity >= size)
     .sort((a, b) => a.capacity - b.capacity);
-  if (suitable.length > 0) {
+
+  // Cross-reference against occupancy at the requested time
+  const existingBookings = await store.listBookingsByDate(date);
+  const confirmed = existingBookings.filter(
+    (b) => b.status === "confirmed" || b.status === "completed",
+  );
+  const startMinutes = slotMinutes;
+  const endMinutes = startMinutes + settings.seat_duration;
+  const occupiedTables = new Set<string>();
+  for (const b of confirmed) {
+    const bDt = new Date(b.datetime);
+    const bStart = bDt.getHours() * 60 + bDt.getMinutes();
+    const bEnd = bStart + settings.seat_duration;
+    // Check overlap
+    if (bStart < endMinutes && bEnd > startMinutes) {
+      for (const tid of b.tables_used) {
+        occupiedTables.add(tid);
+      }
+    }
+  }
+
+  const freeTable = suitable.find((t) => !occupiedTables.has(t.id));
+  if (freeTable) {
+    booking.tables_used = [freeTable.id];
+  } else if (suitable.length > 0) {
+    // Fallback: use smallest suitable table (may result in overallocation risk,
+    // but with re-validation above it means a concurrent booking was extremely
+    // close — this is the best-effort assignment).
     booking.tables_used = [suitable[0].id];
   }
 
@@ -487,6 +539,18 @@ composer.on("message:text", async (ctx, next) => {
 
   const dateStr = dateString(parsed);
   ctx.session.bookingDate = dateStr;
+
+  // Check if the restaurant is open on that day
+  const dayKey = WEEKDAYS[parsed.getDay()];
+  const hours = settings.opening_hours[dayKey];
+  if (!hours) {
+    await ctx.reply(
+      "Sorry, we're closed on that day. Pick another date.",
+    );
+    enterStep(ctx, "booking:reschedule_date");
+    return;
+  }
+
   enterStep(ctx, "booking:reschedule_time");
 
   const size = ctx.session.bookingPartySize ?? 1;
@@ -551,15 +615,38 @@ composer.callbackQuery(/^booking:reschedule_slot:/, async (ctx) => {
     return;
   }
 
-  // Assign a suitable table for the new slot
+  // Assign a suitable table for the new slot — re-check actual occupancy
+  const settings = await store.getDefaultSettings();
   const tables = await store.listTables();
   const suitable = tables
     .filter((t) => t.capacity >= size)
     .sort((a, b) => a.capacity - b.capacity);
 
+  const existingBookings = await store.listBookingsByDate(date);
+  const confirmed = existingBookings.filter(
+    (b) => b.status === "confirmed" || b.status === "completed",
+  );
+  const startMinutes = slotMinutes;
+  const endMinutes = startMinutes + settings.seat_duration;
+  const occupiedTables = new Set<string>();
+  for (const b of confirmed) {
+    // Don't count the booking we're rescheduling
+    if (b.code === code) continue;
+    const bDt = new Date(b.datetime);
+    const bStart = bDt.getHours() * 60 + bDt.getMinutes();
+    const bEnd = bStart + settings.seat_duration;
+    if (bStart < endMinutes && bEnd > startMinutes) {
+      for (const tid of b.tables_used) {
+        occupiedTables.add(tid);
+      }
+    }
+  }
+
+  const freeTable = suitable.find((t) => !occupiedTables.has(t.id));
+
   booking.datetime = `${date}T${time}`;
   booking.status = "confirmed";
-  booking.tables_used = suitable.length > 0 ? [suitable[0].id] : [];
+  booking.tables_used = freeTable ? [freeTable.id] : (suitable.length > 0 ? [suitable[0].id] : []);
   await store.saveBookingWithDateIndex(booking); // Use the date-indexed variant
 
   const niceDate = formatDateNice(new Date(date + "T12:00:00"));
