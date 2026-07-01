@@ -1,0 +1,16 @@
+[
+  {
+    "name": "/remind runs for owner user",
+    "steps": [
+      {
+        "send": { "text": "/remind" },
+        "expect": [
+          {
+            "method": "sendMessage",
+            "payload": { "text": "✅ Checked for reminders. Sent 0 reminder(s)." }
+          }
+        ]
+      }
+    ]
+  }
+]

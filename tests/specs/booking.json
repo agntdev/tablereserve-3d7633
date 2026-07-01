@@ -1,0 +1,129 @@
+[
+  {
+    "name": "/start shows main menu with booking button",
+    "steps": [
+      {
+        "send": { "text": "/start" },
+        "expect": [
+          {
+            "method": "sendMessage",
+            "payload": { "text": "👋 Welcome! Tap a button below to get started." }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "booking start flow requests date",
+    "steps": [
+      {
+        "send": { "callback": "booking:start" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "📅 What date would you like to book? (DD/MM or DD/MM/YYYY)" }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "booking accepts a valid date",
+    "steps": [
+      {
+        "send": { "callback": "booking:start" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "📅 What date would you like to book? (DD/MM or DD/MM/YYYY)" }
+          }
+        ]
+      },
+      {
+        "send": { "text": "15/07" },
+        "expect": [
+          { "method": "sendMessage" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "admin dashboard shows for owner user",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [
+          {
+            "method": "sendMessage"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "my bookings shows empty state",
+    "steps": [
+      {
+        "send": { "callback": "booking:my" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "📋 You have no upcoming bookings.\n\nTap 📅 Book a table to make one!" }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "booking handles invalid date gracefully",
+    "steps": [
+      {
+        "send": { "callback": "booking:start" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "📅 What date would you like to book? (DD/MM or DD/MM/YYYY)" }
+          }
+        ]
+      },
+      {
+        "send": { "text": "not-a-date" },
+        "expect": [
+          {
+            "method": "sendMessage",
+            "payload": { "text": "Couldn't recognise that date. Please use DD/MM format, e.g. 15/07." }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "main menu help button works from booking menu",
+    "steps": [
+      {
+        "send": { "callback": "booking:start" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "📅 What date would you like to book? (DD/MM or DD/MM/YYYY)" }
+          }
+        ]
+      },
+      {
+        "send": { "callback": "menu:main" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "👋 Welcome! Tap a button below to get started." }
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -2,14 +2,37 @@ import { Composer } from "grammy";
 import { readdirSync } from "node:fs";
 import { createBot, type BotContext } from "./toolkit/index.js";
 
-// The per-chat session shape (ephemeral conversation state only). Extend as the
-// bot grows. Durable domain data must NOT live here — use the toolkit's
-// persistent storage (see AGENTS.md).
+// Per-chat ephemeral conversation state. Durable domain data (bookings,
+// settings, tables, owner accounts) lives in PersistentStore (src/store.ts).
 export interface Session {
-  // example: step?: "awaiting_amount";
+  step?: string;
+  // Flow timeout — unix ms after which the flow auto-expires
+  expiresAt?: number;
+  // Booking flow data
+  bookingDate?: string;
+  bookingTime?: string;
+  bookingPartySize?: number;
+  bookingGuestName?: string;
+  bookingPhone?: string;
+  // Reschedule flow data
+  rescheduleCode?: string;
+  // Admin flow data
+  adminTableName?: string;
 }
 
 export type Ctx = BotContext<Session>;
+
+// Flow timeout duration (10 minutes).
+const FLOW_TTL_MS = 10 * 60 * 1000;
+
+/** Set the session step and a flow timeout. */
+export function enterStep(ctx: Ctx, step: string): void {
+  ctx.session.step = step;
+  ctx.session.expiresAt = Date.now() + FLOW_TTL_MS;
+}
+
+/** Text shown when a flow times out. */
+export const FLOW_TIMEOUT_TEXT = "The flow timed out. Tap /start to begin again.";
 
 /**
  * buildBot — assembles the bot, AUTO-LOADS every feature handler from
@@ -20,6 +43,17 @@ export type Ctx = BotContext<Session>;
 export async function buildBot(token: string) {
   const bot = createBot<Session>(token, {
     initial: () => ({}),
+  });
+
+  // Flow timeout sweeper — resets expired flows before any handler runs.
+  bot.use(async (ctx, next) => {
+    if (ctx.session.expiresAt && Date.now() > ctx.session.expiresAt && ctx.session.step && ctx.session.step !== "idle") {
+      ctx.session.step = "idle";
+      ctx.session.expiresAt = undefined;
+      await ctx.reply(FLOW_TIMEOUT_TEXT);
+      return;
+    }
+    return next();
   });
 
   const dir = new URL("./handlers/", import.meta.url);
@@ -34,7 +68,7 @@ export async function buildBot(token: string) {
     );
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    files = []; // no handlers/ dir yet → nothing to load
+    files = [];
   }
   for (const file of files.sort()) {
     const mod = (await import(new URL(file, dir).href)) as { default?: Composer<Ctx> };

@@ -9,8 +9,13 @@ import { inlineButton, inlineKeyboard } from "../toolkit/index.js";
 const composer = new Composer<Ctx>();
 
 const HELP =
-  "ℹ️ Tap /start to open the menu, then pick what you want from the buttons.\n\n" +
-  "Everything in this bot is reachable by tapping — you don't need to remember any commands.";
+  "ℹ️ Welcome to TableReserve!\n\n" +
+  "Here's what you can do:\n" +
+  "• /start — Open the main menu\n" +
+  "• Book a table — Reserve a spot for your party\n" +
+  "• My bookings — View your upcoming reservations\n" +
+  "• /cancel — Stop a current flow (if you're in the middle of one)\n\n" +
+  "Just tap /start and follow the buttons — it's that simple.";
 
 const backToMenu = inlineKeyboard([[inlineButton("⬅️ Back to menu", "menu:main")]]);
 
