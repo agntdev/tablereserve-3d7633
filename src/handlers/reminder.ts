@@ -25,7 +25,7 @@ composer.command("remind", async (ctx) => {
     await ctx.reply("Sorry, only the owner can run this.");
     return;
   }
-  const sent = await sendPendingReminders();
+  const sent = await sendPendingReminders(ctx.api);
   await ctx.reply(`✅ Checked for reminders. Sent ${sent} reminder(s).`);
 });
 
@@ -33,7 +33,9 @@ composer.command("remind", async (ctx) => {
 // sendPendingReminders — scan upcoming bookings and send DMs
 // ---------------------------------------------------------------------------
 
-async function sendPendingReminders(): Promise<number> {
+async function sendPendingReminders(
+  api: { sendMessage: (chatId: number, text: string, opts?: Record<string, unknown>) => Promise<unknown> },
+): Promise<number> {
   const store = await getStore();
   const settings = await store.getDefaultSettings();
   const allUpcoming = await store.listAllUpcomingBookings();
@@ -52,13 +54,10 @@ async function sendPendingReminders(): Promise<number> {
 
   for (const b of pending) {
     try {
-      // We can't easily import the bot instance here since the handler is
-      // a Composer. The reminders would be sent from outside via cron/interval.
-      // For now, this is the export that a cron/scheduler calls.
-      // The actual sending logic is in sendReminderToBooking.
-      sent++;
+      const ok = await sendReminderToBooking({ api }, b);
+      if (ok) sent++;
     } catch {
-      // 403 from blocked user — skip silently
+      // 403 from blocked user or unexpected error — skip silently per AGENTS.md
     }
   }
   return sent;

@@ -1,5 +1,6 @@
 import { Composer } from "grammy";
 import type { Ctx } from "../bot.js";
+import { enterStep } from "../bot.js";
 import {
   registerMainMenuItem,
   inlineButton,
@@ -7,7 +8,7 @@ import {
   paginate,
   type InlineButton,
 } from "../toolkit/index.js";
-import { getStore, type Booking } from "../store.js";
+import { getStore, type Booking, type OwnerNotificationPrefs } from "../store.js";
 import { todayString, dateString, daysFromNow } from "../clock.js";
 
 // Admin is a slash command per spec, plus a main-menu button for owners who
@@ -100,6 +101,7 @@ async function showDashboard(ctx: Ctx): Promise<void> {
       [inlineButton("📋 Today's bookings", "admin:list_today")],
       [inlineButton("🏠 Manage tables", "admin:tables")],
       [inlineButton("⚙️ Settings", "admin:settings")],
+      [inlineButton("🔔 Notifications", "admin:notifications")],
       [inlineButton("📅 Daily summary", "admin:summary")],
       [inlineButton("⬅️ Back to menu", "menu:main")],
     ]),
@@ -331,7 +333,7 @@ composer.callbackQuery("admin:tables", async (ctx) => {
 composer.callbackQuery("admin:add_table", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!(await ensureOwner(ctx))) return;
-  ctx.session.step = "admin:add_table_name";
+  enterStep(ctx, "admin:add_table_name");
   await ctx.editMessageText(
     "Enter a name for the new table (e.g. 'Table 1' or 'Window table'):",
     { reply_markup: inlineKeyboard([[
@@ -349,7 +351,7 @@ composer.on("message:text", async (ctx, next) => {
   }
 
   ctx.session.adminTableName = name;
-  ctx.session.step = "admin:add_table_capacity";
+  enterStep(ctx, "admin:add_table_capacity");
   await ctx.reply(
     `Got it — "${name}". How many guests can this table seat?`,
     { reply_markup: { force_reply: true, input_field_placeholder: "e.g. 4" } },
@@ -448,6 +450,7 @@ composer.callbackQuery("admin:settings", async (ctx) => {
     reply_markup: inlineKeyboard([
       [inlineButton("⏱ Set seat duration", "admin:set_duration")],
       [inlineButton("📅 Set booking window", "admin:set_window")],
+      [inlineButton("⏰ Set reminder lead time", "admin:set_reminder_lead")],
       [inlineButton("⬅️ Back to dashboard", "admin:dashboard")],
     ]),
   });
@@ -457,7 +460,7 @@ composer.callbackQuery("admin:settings", async (ctx) => {
 composer.callbackQuery("admin:set_duration", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!(await ensureOwner(ctx))) return;
-  ctx.session.step = "admin:duration";
+  enterStep(ctx, "admin:duration");
   await ctx.editMessageText(
     "Enter seat duration in minutes (e.g. 90):",
     { reply_markup: inlineKeyboard([[
@@ -489,7 +492,7 @@ composer.on("message:text", async (ctx, next) => {
 composer.callbackQuery("admin:set_window", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!(await ensureOwner(ctx))) return;
-  ctx.session.step = "admin:window";
+  enterStep(ctx, "admin:window");
   await ctx.editMessageText(
     "Enter the advance booking window in days (e.g. 30):",
     { reply_markup: inlineKeyboard([[
@@ -514,6 +517,114 @@ composer.on("message:text", async (ctx, next) => {
     reply_markup: inlineKeyboard([[
       inlineButton("⬅️ Back to settings", "admin:settings"),
     ]]),
+  });
+});
+
+// Reminder lead time
+composer.callbackQuery("admin:set_reminder_lead", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await ensureOwner(ctx))) return;
+  enterStep(ctx, "admin:reminder_lead");
+  await ctx.editMessageText(
+    "Enter reminder lead time in minutes before the booking (e.g. 60):",
+    { reply_markup: inlineKeyboard([[
+      inlineButton("⬅️ Cancel", "admin:settings"),
+    ]]) },
+  );
+});
+
+composer.on("message:text", async (ctx, next) => {
+  if (ctx.session.step !== "admin:reminder_lead") return next();
+  const n = parseInt(ctx.message.text.trim(), 10);
+  if (isNaN(n) || n < 5 || n > 1440) {
+    await ctx.reply("Please enter a number between 5 and 1440 minutes.");
+    return;
+  }
+  const store = await getStore();
+  const settings = await store.getDefaultSettings();
+  settings.reminder_lead_time = n;
+  await store.saveSettings(settings);
+  ctx.session.step = "idle";
+  await ctx.reply(`✅ Reminder lead time set to ${n} minutes.`, {
+    reply_markup: inlineKeyboard([[
+      inlineButton("⬅️ Back to settings", "admin:settings"),
+    ]]),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Notification preferences (per-owner toggle)
+// ---------------------------------------------------------------------------
+
+composer.callbackQuery("admin:notifications", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await ensureOwner(ctx))) return;
+
+  const userId = ctx.from!.id;
+  const store = await getStore();
+  const settings = await store.getDefaultSettings();
+  const prefs = await store.getOwnerPrefs(userId);
+
+  const msg =
+    "🔔 Notification Preferences\n\n" +
+    `⏰ Reminder lead time: ${settings.reminder_lead_time} min before\n` +
+    `   (Configure in ⚙️ Settings)\n\n` +
+    "Per-owner preferences:";
+
+  await ctx.editMessageText(msg, {
+    reply_markup: inlineKeyboard([
+      [
+        inlineButton(
+          `${prefs.new_booking_alerts ? "✅" : "☑️"} New booking alerts`,
+          `admin:toggle:new_booking_alerts`,
+        ),
+      ],
+      [
+        inlineButton(
+          `${prefs.daily_summary ? "✅" : "☑️"} Daily summary`,
+          `admin:toggle:daily_summary`,
+        ),
+      ],
+      [inlineButton("⬅️ Back to dashboard", "admin:dashboard")],
+    ]),
+  });
+});
+
+composer.callbackQuery(/^admin:toggle:/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await ensureOwner(ctx))) return;
+
+  const userId = ctx.from!.id;
+  const key = ctx.callbackQuery.data.replace("admin:toggle:", "") as keyof OwnerNotificationPrefs;
+  const store = await getStore();
+  const prefs = await store.getOwnerPrefs(userId);
+  prefs[key] = !prefs[key];
+  await store.saveOwnerPrefs(userId, prefs);
+
+  // Re-render notifications view
+  const settings = await store.getDefaultSettings();
+  const msg =
+    "🔔 Notification Preferences\n\n" +
+    `⏰ Reminder lead time: ${settings.reminder_lead_time} min before\n` +
+    `   (Configure in ⚙️ Settings)\n\n` +
+    "Per-owner preferences:";
+
+  await ctx.editMessageText(msg, {
+    reply_markup: inlineKeyboard([
+      [
+        inlineButton(
+          `${prefs.new_booking_alerts ? "✅" : "☑️"} New booking alerts`,
+          `admin:toggle:new_booking_alerts`,
+        ),
+      ],
+      [
+        inlineButton(
+          `${prefs.daily_summary ? "✅" : "☑️"} Daily summary`,
+          `admin:toggle:daily_summary`,
+        ),
+      ],
+      [inlineButton("⬅️ Back to dashboard", "admin:dashboard")],
+    ]),
   });
 });
 

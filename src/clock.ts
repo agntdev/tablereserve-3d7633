@@ -28,9 +28,9 @@ export function timeString(d: Date): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-/** N days from now as a Date (start of day). */
+/** N days from now as a Date (start of day). Clones the clock's Date before mutating. */
 export function daysFromNow(n: number): Date {
-  const d = _now();
+  const d = new Date(_now().getTime());
   d.setDate(d.getDate() + n);
   d.setHours(0, 0, 0, 0);
   return d;

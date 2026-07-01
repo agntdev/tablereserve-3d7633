@@ -1,12 +1,13 @@
 import { Composer } from "grammy";
 import type { Ctx } from "../bot.js";
+import { enterStep } from "../bot.js";
 import {
   registerMainMenuItem,
   inlineButton,
   inlineKeyboard,
 } from "../toolkit/index.js";
-import { getStore, type Booking } from "../store.js";
-import { todayString, dateString, daysFromNow } from "../clock.js";
+import { getStore, type Booking, type OwnerNotificationPrefs } from "../store.js";
+import { todayString, dateString, daysFromNow, now } from "../clock.js";
 
 registerMainMenuItem({
   label: "📅 Book a table",
@@ -38,7 +39,7 @@ function parseDateInput(text: string): Date | null {
   const day = parseInt(parts[0], 10);
   const month = parseInt(parts[1], 10);
   if (isNaN(day) || isNaN(month)) return null;
-  let year = parts.length >= 3 ? parseInt(parts[2], 10) : new Date().getFullYear();
+  let year = parts.length >= 3 ? parseInt(parts[2], 10) : now().getFullYear();
   if (year < 100) year += 2000;
   const d = new Date(year, month - 1, day);
   if (d.getMonth() !== month - 1 || d.getDate() !== day) return null;
@@ -53,7 +54,7 @@ const MAX_PARTY_SIZE = 20;
 
 composer.callbackQuery("booking:start", async (ctx) => {
   await ctx.answerCallbackQuery();
-  ctx.session.step = "booking:date";
+  enterStep(ctx, "booking:date");
   ctx.session.bookingDate = undefined;
   ctx.session.bookingTime = undefined;
   ctx.session.bookingPartySize = undefined;
@@ -87,29 +88,31 @@ composer.on("message:text", async (ctx, next) => {
   }
 
   const today = new Date(todayString() + "T12:00:00");
-  const maxDate = daysFromNow(90); // reasonable default beyond advance_window
+  const store = await getStore();
+  const settings = await store.getDefaultSettings();
+  const maxDate = daysFromNow(settings.advance_window);
   if (parsed < today) {
     await ctx.reply("That date is in the past. Pick a future date.");
     return;
   }
   if (parsed > maxDate) {
-    await ctx.reply("That date is too far ahead. Pick a date within 90 days.");
+    await ctx.reply(
+      `That date is too far ahead. We can only book up to ${settings.advance_window} days in advance.`,
+    );
     return;
   }
 
   const dateStr = dateString(parsed);
   ctx.session.bookingDate = dateStr;
-  ctx.session.step = "booking:time";
+  enterStep(ctx, "booking:time");
 
-  const store = await getStore();
-  const settings = await store.getDefaultSettings();
   const dayKey = WEEKDAYS[parsed.getDay()];
   const hours = settings.opening_hours[dayKey];
   if (!hours) {
     await ctx.reply(
       "Sorry, we're closed on that day. Pick another date.",
     );
-    ctx.session.step = "booking:date";
+    enterStep(ctx, "booking:date");
     return;
   }
 
@@ -153,7 +156,7 @@ composer.on("message:text", async (ctx, next) => {
         inlineButton("⬅️ Pick a different date", "booking:start"),
       ]]) },
     );
-    ctx.session.step = "booking:date";
+    enterStep(ctx, "booking:date");
     return;
   }
 
@@ -183,7 +186,7 @@ composer.on("message:text", async (ctx, next) => {
   }
 
   ctx.session.bookingTime = timeStr;
-  ctx.session.step = "booking:party_size";
+  enterStep(ctx, "booking:party_size");
   await ctx.reply(
     "How many guests?",
     { reply_markup: { force_reply: true, input_field_placeholder: "e.g. 4" } },
@@ -195,7 +198,7 @@ composer.callbackQuery(/^booking:slot:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const time = ctx.callbackQuery.data.replace("booking:slot:", "");
   ctx.session.bookingTime = time;
-  ctx.session.step = "booking:party_size";
+  enterStep(ctx, "booking:party_size");
   await ctx.editMessageText(
     "How many guests?",
     {
@@ -248,12 +251,12 @@ composer.on("message:text", async (ctx, next) => {
         inlineButton("⬅️ Pick a different time", "booking:start"),
       ]]) },
     );
-    ctx.session.step = "booking:date";
+    enterStep(ctx, "booking:date");
     return;
   }
 
   ctx.session.bookingPartySize = n;
-  ctx.session.step = "booking:name";
+  enterStep(ctx, "booking:name");
   await ctx.reply(
     "What name should the booking be under?",
     { reply_markup: { force_reply: true, input_field_placeholder: "Your name" } },
@@ -274,7 +277,7 @@ composer.on("message:text", async (ctx, next) => {
   }
 
   ctx.session.bookingGuestName = name;
-  ctx.session.step = "booking:phone";
+  enterStep(ctx, "booking:phone");
   await ctx.reply(
     "What's your phone number? (optional — tap Skip if you'd rather not)",
     {
@@ -330,17 +333,16 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
     chat_id: ctx.chat?.id,
   };
 
-  await store.saveBookingWithDateIndex(booking);
-
-  // Assign a suitable table
+  // Assign a suitable table before saving
   const tables = await store.listTables();
   const suitable = tables
     .filter((t) => t.capacity >= size)
     .sort((a, b) => a.capacity - b.capacity);
   if (suitable.length > 0) {
     booking.tables_used = [suitable[0].id];
-    await store.saveBooking(booking);
   }
+
+  await store.saveBookingWithDateIndex(booking);
 
   const niceDate = formatDateNice(
     new Date(date + "T12:00:00"),
@@ -363,6 +365,41 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
   });
 
   ctx.session.step = "idle";
+
+  // Notify owner accounts about the new booking
+  try {
+    await notifyOwnersNewBooking(ctx, booking, niceDate, time);
+  } catch {
+    // Owner notification is best-effort — never block the guest flow
+  }
+}
+
+/** Send a new-booking alert to all registered owners who have opted in. */
+async function notifyOwnersNewBooking(
+  ctx: Ctx,
+  booking: Booking,
+  niceDate: string,
+  time: string,
+): Promise<void> {
+  const store = await getStore();
+  const owners = await store.listOwners();
+  const alert =
+    `📢 New booking!\n\n` +
+    `📋 Code: ${booking.code}\n` +
+    `📅 ${niceDate} at ${time}\n` +
+    `👤 ${booking.guest_name}${booking.phone ? `\n📞 ${booking.phone}` : ""}\n` +
+    `👥 ${booking.party_size} guests\n` +
+    `🆔 Table: ${booking.tables_used.join(", ") || "Not assigned"}`;
+
+  for (const owner of owners) {
+    try {
+      const prefs = await store.getOwnerPrefs(owner.telegram_id);
+      if (!prefs.new_booking_alerts) continue;
+      await ctx.api.sendMessage(owner.telegram_id, alert);
+    } catch {
+      // 403 from blocked owner — skip silently. Never abort notifications.
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -409,7 +446,7 @@ composer.callbackQuery(/^booking:reschedule:/, async (ctx) => {
   ctx.session.bookingPhone = booking.phone;
 
   // Re-enter date selection
-  ctx.session.step = "booking:reschedule_date";
+  enterStep(ctx, "booking:reschedule_date");
   await ctx.editMessageText(
     "Let's find a new time for your booking. What new date works? (DD/MM or DD/MM/YYYY)",
     {
@@ -434,16 +471,24 @@ composer.on("message:text", async (ctx, next) => {
   }
 
   const today = new Date(todayString() + "T12:00:00");
+  const store = await getStore();
+  const settings = await store.getDefaultSettings();
+  const maxDate = daysFromNow(settings.advance_window);
   if (parsed < today) {
     await ctx.reply("That date is in the past. Pick a future date.");
+    return;
+  }
+  if (parsed > maxDate) {
+    await ctx.reply(
+      `That date is too far ahead. We can only book up to ${settings.advance_window} days in advance.`,
+    );
     return;
   }
 
   const dateStr = dateString(parsed);
   ctx.session.bookingDate = dateStr;
-  ctx.session.step = "booking:reschedule_time";
+  enterStep(ctx, "booking:reschedule_time");
 
-  const store = await getStore();
   const size = ctx.session.bookingPartySize ?? 1;
   const slots = await store.findAvailableSlots(dateStr, size);
 
@@ -451,7 +496,7 @@ composer.on("message:text", async (ctx, next) => {
     await ctx.reply(
       "Sorry, no tables are available on that date for your party size. Pick another date.",
     );
-    ctx.session.step = "booking:reschedule_date";
+    enterStep(ctx, "booking:reschedule_date");
     return;
   }
 
@@ -469,24 +514,53 @@ composer.on("message:text", async (ctx, next) => {
   );
 });
 
-// Reschedule slot tap
+// Reschedule slot tap — validates availability and reassigns table
 composer.callbackQuery(/^booking:reschedule_slot:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const time = ctx.callbackQuery.data.replace("booking:reschedule_slot:", "");
-  ctx.session.bookingTime = time;
-
   const code = ctx.session.rescheduleCode!;
   const date = ctx.session.bookingDate!;
+  const size = ctx.session.bookingPartySize!;
   const store = await getStore();
+
+  // Validate the slot is still available for this party size
+  const slots = await store.findAvailableSlots(date, size);
+  const slotMinutes =
+    parseInt(time.split(":")[0], 10) * 60 +
+    parseInt(time.split(":")[1], 10);
+  const valid = slots.some((s) => {
+    const [sh, sm] = s.split(":").map(Number);
+    return sh * 60 + sm === slotMinutes;
+  });
+
+  if (!valid) {
+    await ctx.editMessageText(
+      "Sorry, that time is no longer available. Please pick another slot.",
+      {
+        reply_markup: inlineKeyboard([
+          [inlineButton("⬅️ Back to time selection", "booking:reschedule_date")],
+        ]),
+      },
+    );
+    return;
+  }
+
   const booking = await store.getBooking(code);
   if (!booking) {
     await ctx.editMessageText("Couldn't find your booking. Please start again.");
     return;
   }
 
+  // Assign a suitable table for the new slot
+  const tables = await store.listTables();
+  const suitable = tables
+    .filter((t) => t.capacity >= size)
+    .sort((a, b) => a.capacity - b.capacity);
+
   booking.datetime = `${date}T${time}`;
   booking.status = "confirmed";
-  await store.saveBooking(booking);
+  booking.tables_used = suitable.length > 0 ? [suitable[0].id] : [];
+  await store.saveBookingWithDateIndex(booking); // Use the date-indexed variant
 
   const niceDate = formatDateNice(new Date(date + "T12:00:00"));
   await ctx.editMessageText(
