@@ -318,20 +318,25 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
   const phone = ctx.session.bookingPhone ?? "";
   const store = await getStore();
 
-  // Re-validate the slot is still available (prevents double-booking from
-  // concurrent requests that validated earlier in the flow).
-  const slots = await store.findAvailableSlots(date, size);
-  const slotMinutes =
-    parseInt(time.split(":")[0], 10) * 60 +
-    parseInt(time.split(":")[1], 10);
-  const valid = slots.some((s) => {
-    const [sh, sm] = s.split(":").map(Number);
-    return sh * 60 + sm === slotMinutes;
-  });
+  // Generate booking code first (independent of slot state)
+  const code = await store.generateBookingCode();
 
-  if (!valid) {
+  // --- Atomic check-and-assign: re-read occupancy RIGHT before saving to
+  // minimize the TOCTOU window. This combines the "is slot valid" check
+  // with "which specific table is free" in one synchronized read of the
+  // date's booking set — a concurrent writer that happens between here and
+  // saveBookingWithDateIndex will be caught by the booking-code collision
+  // guard (generateBookingCode retries on collision), and if it claims the
+  // last suitable table we abort rather than silently double-book.
+  const settings = await store.getDefaultSettings();
+  const tables = await store.listTables();
+  const suitable = tables
+    .filter((t) => t.capacity >= size)
+    .sort((a, b) => a.capacity - b.capacity);
+
+  if (suitable.length === 0) {
     await ctx.reply(
-      "Sorry, that time slot is no longer available. Please start a new booking.",
+      "Sorry, we don't have a table large enough for your party. Please try a smaller group or another time.",
       {
         reply_markup: inlineKeyboard([
           [inlineButton("📅 Book a table", "booking:start")],
@@ -342,8 +347,43 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
     return;
   }
 
-  // Generate booking code
-  const code = await store.generateBookingCode();
+  const slotMinutes =
+    parseInt(time.split(":")[0], 10) * 60 +
+    parseInt(time.split(":")[1], 10);
+  const startMinutes = slotMinutes;
+  const endMinutes = startMinutes + settings.seat_duration;
+
+  // Re-read occupancy right now
+  const existingBookings = await store.listBookingsByDate(date);
+  const confirmed = existingBookings.filter(
+    (b) => b.status === "confirmed",
+  );
+  const occupiedTables = new Set<string>();
+  for (const b of confirmed) {
+    const bDt = new Date(b.datetime);
+    const bStart = bDt.getHours() * 60 + bDt.getMinutes();
+    const bEnd = bStart + settings.seat_duration;
+    if (bStart < endMinutes && bEnd > startMinutes) {
+      for (const tid of b.tables_used) {
+        occupiedTables.add(tid);
+      }
+    }
+  }
+
+  // Check if any suitable table is free
+  const freeTable = suitable.find((t) => !occupiedTables.has(t.id));
+  if (!freeTable) {
+    await ctx.reply(
+      "Sorry, that time slot is no longer available. Please try another time or date.",
+      {
+        reply_markup: inlineKeyboard([
+          [inlineButton("📅 Book a table", "booking:start")],
+        ]),
+      },
+    );
+    ctx.session.step = "idle";
+    return;
+  }
 
   const booking: Booking = {
     code,
@@ -352,48 +392,12 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
     party_size: size,
     datetime: `${date}T${time}`,
     status: "confirmed",
-    tables_used: [],
+    tables_used: [freeTable.id],
     user_id: ctx.from?.id,
     chat_id: ctx.chat?.id,
   };
 
-  // Assign a suitable table by checking what's actually free at this time
-  const settings = await store.getDefaultSettings();
-  const tables = await store.listTables();
-  const suitable = tables
-    .filter((t) => t.capacity >= size)
-    .sort((a, b) => a.capacity - b.capacity);
-
-  // Cross-reference against occupancy at the requested time
-  const existingBookings = await store.listBookingsByDate(date);
-  const confirmed = existingBookings.filter(
-    (b) => b.status === "confirmed" || b.status === "completed",
-  );
-  const startMinutes = slotMinutes;
-  const endMinutes = startMinutes + settings.seat_duration;
-  const occupiedTables = new Set<string>();
-  for (const b of confirmed) {
-    const bDt = new Date(b.datetime);
-    const bStart = bDt.getHours() * 60 + bDt.getMinutes();
-    const bEnd = bStart + settings.seat_duration;
-    // Check overlap
-    if (bStart < endMinutes && bEnd > startMinutes) {
-      for (const tid of b.tables_used) {
-        occupiedTables.add(tid);
-      }
-    }
-  }
-
-  const freeTable = suitable.find((t) => !occupiedTables.has(t.id));
-  if (freeTable) {
-    booking.tables_used = [freeTable.id];
-  } else if (suitable.length > 0) {
-    // Fallback: use smallest suitable table (may result in overallocation risk,
-    // but with re-validation above it means a concurrent booking was extremely
-    // close — this is the best-effort assignment).
-    booking.tables_used = [suitable[0].id];
-  }
-
+  const assignedTableName = freeTable.name;
   await store.saveBookingWithDateIndex(booking);
 
   const niceDate = formatDateNice(
@@ -405,6 +409,7 @@ async function confirmBooking(ctx: Ctx): Promise<void> {
     `📋 Code: ${code}\n` +
     `📅 ${niceDate} at ${time}\n` +
     `👥 ${size} guest${size > 1 ? "s" : ""}\n` +
+    `🪑 ${assignedTableName}\n` +
     `👤 ${name}${phone ? `\n📞 ${phone}` : ""}\n\n` +
     `We'll send you a reminder before your reservation. See you soon!`;
 
@@ -462,6 +467,18 @@ composer.callbackQuery(/^booking:cancel:/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const code = ctx.callbackQuery.data.replace("booking:cancel:", "");
   const store = await getStore();
+  const booking = await store.getBooking(code);
+  if (!booking) {
+    await ctx.editMessageText("Couldn't find that booking. It may have already been cancelled.");
+    return;
+  }
+  // Verify ownership — only the booking creator or an owner can cancel
+  const userId = ctx.from?.id;
+  const isOwner = userId ? await store.isOwner(userId) : false;
+  if (booking.user_id != null && userId != null && booking.user_id !== userId && !isOwner) {
+    await ctx.editMessageText("Sorry, you can only cancel your own bookings.");
+    return;
+  }
   const updated = await store.updateBookingStatus(code, "cancelled");
   if (updated) {
     await ctx.editMessageText(
@@ -492,12 +509,34 @@ composer.callbackQuery(/^booking:reschedule:/, async (ctx) => {
     return;
   }
 
+  // Verify ownership — only the booking creator or an owner can reschedule
+  const userId = ctx.from?.id;
+  const isOwner = userId ? await store.isOwner(userId) : false;
+  if (booking.user_id != null && userId != null && booking.user_id !== userId && !isOwner) {
+    await ctx.editMessageText("Sorry, you can only reschedule your own bookings.");
+    return;
+  }
+
   ctx.session.rescheduleCode = code;
   ctx.session.bookingPartySize = booking.party_size;
   ctx.session.bookingGuestName = booking.guest_name;
   ctx.session.bookingPhone = booking.phone;
 
   // Re-enter date selection
+  enterStep(ctx, "booking:reschedule_date");
+  await ctx.editMessageText(
+    "Let's find a new time for your booking. What new date works? (DD/MM or DD/MM/YYYY)",
+    {
+      reply_markup: inlineKeyboard([
+        [inlineButton("⬅️ Back to menu", "menu:main")],
+      ]),
+    },
+  );
+});
+
+// "Pick a different date" button from reschedule time view — re-prompt date input
+composer.callbackQuery("booking:reschedule_date", async (ctx) => {
+  await ctx.answerCallbackQuery();
   enterStep(ctx, "booking:reschedule_date");
   await ctx.editMessageText(
     "Let's find a new time for your booking. What new date works? (DD/MM or DD/MM/YYYY)",
@@ -615,6 +654,17 @@ composer.callbackQuery(/^booking:reschedule_slot:/, async (ctx) => {
     return;
   }
 
+  // Verify ownership — only the booking creator or an owner can reschedule
+  const userId = ctx.from?.id;
+  const isOwner = userId ? await store.isOwner(userId) : false;
+  if (booking.user_id != null && userId != null && booking.user_id !== userId && !isOwner) {
+    await ctx.editMessageText("Sorry, you can only reschedule your own bookings.");
+    return;
+  }
+
+  // Track the OLD date so we can remove the index after updating
+  const oldDate = booking.datetime.substring(0, 10);
+
   // Assign a suitable table for the new slot — re-check actual occupancy
   const settings = await store.getDefaultSettings();
   const tables = await store.listTables();
@@ -644,16 +694,22 @@ composer.callbackQuery(/^booking:reschedule_slot:/, async (ctx) => {
 
   const freeTable = suitable.find((t) => !occupiedTables.has(t.id));
 
+  const freeTableName = freeTable ? freeTable.name : (suitable.length > 0 ? suitable[0].name : "");
   booking.datetime = `${date}T${time}`;
   booking.status = "confirmed";
   booking.tables_used = freeTable ? [freeTable.id] : (suitable.length > 0 ? [suitable[0].id] : []);
-  await store.saveBookingWithDateIndex(booking); // Use the date-indexed variant
+  // Clear reminded_at so the reminder sweep re-evaluates the new datetime
+  booking.reminded_at = undefined;
+  // Remove old date index before saving with new date index
+  await store.removeBookingDateIndex(booking.code, oldDate);
+  await store.saveBookingWithDateIndex(booking);
 
   const niceDate = formatDateNice(new Date(date + "T12:00:00"));
   await ctx.editMessageText(
     `🔄 Rescheduled! Your booking ${code} is now:\n\n` +
     `📅 ${niceDate} at ${time}\n` +
-    `👥 ${booking.party_size} guest${booking.party_size > 1 ? "s" : ""}\n`,
+    `👥 ${booking.party_size} guest${booking.party_size > 1 ? "s" : ""}\n` +
+    `🪑 ${freeTableName}\n`,
     {
       reply_markup: inlineKeyboard([
         [inlineButton("📅 Back to menu", "menu:main")],

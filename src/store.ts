@@ -18,6 +18,7 @@ export interface RestaurantSettings {
   seat_duration: number; // minutes (default 90)
   advance_window: number; // days (default 30)
   reminder_lead_time: number; // minutes before (default 60)
+  retention_days: number; // days to keep past/completed bookings (default 90)
 }
 
 export interface Table {
@@ -162,6 +163,7 @@ export class PersistentStore {
       seat_duration: 90,
       advance_window: 30,
       reminder_lead_time: 60,
+      retention_days: 90,
     };
     await this.saveSettings(defaults);
     return defaults;
@@ -263,6 +265,50 @@ export class PersistentStore {
     b.status = status;
     await this.saveBooking(b);
     return b;
+  }
+
+  /** Remove a booking code from a specific date's index (used when rescheduling). */
+  async removeBookingDateIndex(code: string, date: string): Promise<void> {
+    await indexRemove(this.kv, `idx:date_bookings:${date}`, code);
+    // Clean up the master date index if the date has no more bookings
+    const remaining = await indexList(this.kv, `idx:date_bookings:${date}`);
+    if (remaining.length === 0) {
+      await indexRemove(this.kv, "idx:booking_dates", date);
+    }
+  }
+
+  /** Fully delete a booking record and all its indices (for retention cleanup). */
+  async deleteBooking(code: string): Promise<void> {
+    const b = await this.getBooking(code);
+    if (!b) return;
+    const date = b.datetime.substring(0, 10);
+    await this.kv.del(`booking:${code}`);
+    await this.removeBookingDateIndex(code, date);
+    if (b.user_id != null) {
+      await indexRemove(this.kv, `idx:user_bookings:${b.user_id}`, code);
+    }
+  }
+
+  /** Remove expired bookings that exceed the retention period. */
+  async removeExpiredBookings(nowDate: string, retentionDays: number): Promise<number> {
+    const cutoffMs = new Date(nowDate + "T00:00:00").getTime() - retentionDays * 86400_000;
+    const dates = await indexList(this.kv, "idx:booking_dates");
+    let removed = 0;
+    for (const date of dates) {
+      const dateMs = new Date(date + "T12:00:00").getTime();
+      if (dateMs > cutoffMs) continue;
+      const codes = await indexList(this.kv, `idx:date_bookings:${date}`);
+      for (const code of codes) {
+        const b = await this.getBooking(code);
+        if (!b) continue;
+        // Only remove non-active bookings (cancelled, no_show, completed) that are past retention
+        if (b.status === "cancelled" || b.status === "no_show" || b.status === "completed") {
+          await this.deleteBooking(code);
+          removed++;
+        }
+      }
+    }
+    return removed;
   }
 
   // --- Owner accounts ---
