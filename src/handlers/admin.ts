@@ -9,7 +9,7 @@ import {
   type InlineButton,
 } from "../toolkit/index.js";
 import { getStore, type Booking, type OwnerNotificationPrefs } from "../store.js";
-import { todayString, dateString, daysFromNow } from "../clock.js";
+import { todayString, dateString, daysFromNow, now } from "../clock.js";
 
 // Admin is a slash command per spec, plus a main-menu button for owners who
 // are already registered.
@@ -368,7 +368,7 @@ composer.on("message:text", async (ctx, next) => {
 
   const tableName = ctx.session.adminTableName ?? `Table ${n}`;
   const store = await getStore();
-  const tableId = `T${Date.now()}`;
+  const tableId = `T${now().getTime()}`;
   await store.saveTable({ id: tableId, capacity: n, name: tableName });
   ctx.session.step = "idle";
   await ctx.reply(`✅ Table "${tableName}" (${n} guests) added!`, {

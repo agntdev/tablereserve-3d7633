@@ -33,7 +33,7 @@ composer.command("remind", async (ctx) => {
 // sendPendingReminders — scan upcoming bookings and send DMs
 // ---------------------------------------------------------------------------
 
-async function sendPendingReminders(
+export async function sendPendingReminders(
   api: { sendMessage: (chatId: number, text: string, opts?: Record<string, unknown>) => Promise<unknown> },
 ): Promise<number> {
   const store = await getStore();
@@ -46,6 +46,7 @@ async function sendPendingReminders(
   const pending = allUpcoming.filter((b) => {
     if (b.status !== "confirmed") return false;
     if (!b.chat_id) return false;
+    if (b.reminded_at) return false; // Already sent a reminder
     const bookingTime = new Date(b.datetime).getTime();
     const remindAt = bookingTime - reminderLeadMs;
     // Reminder is due if remindAt is in the past but booking is still in the future
@@ -54,7 +55,7 @@ async function sendPendingReminders(
 
   for (const b of pending) {
     try {
-      const ok = await sendReminderToBooking({ api }, b);
+      const ok = await sendReminderToBooking({ api }, b, store);
       if (ok) sent++;
     } catch {
       // 403 from blocked user or unexpected error — skip silently per AGENTS.md
@@ -70,6 +71,7 @@ async function sendPendingReminders(
 export async function sendReminderToBooking(
   bot: { api: { sendMessage: (chatId: number, text: string, opts?: Record<string, unknown>) => Promise<unknown> } },
   booking: { code: string; datetime: string; guest_name: string; party_size: number; chat_id?: number },
+  store?: { getBooking: (code: string) => Promise<any>; saveBooking: (b: any) => Promise<void> },
 ): Promise<boolean> {
   if (!booking.chat_id) return false;
   const dt = new Date(booking.datetime);
@@ -86,6 +88,13 @@ export async function sendReminderToBooking(
       `👥 ${booking.party_size} guests\n\n` +
       `See you soon! 🍽️`,
     );
+    // Mark reminder as sent to prevent duplicate sends
+    if (store) {
+      const existing = await store.getBooking(booking.code);
+      if (existing) {
+        await store.saveBooking({ ...existing, reminded_at: now().toISOString() });
+      }
+    }
     return true;
   } catch (err) {
     const e = err as { statusCode?: number };
