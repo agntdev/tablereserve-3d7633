@@ -1,0 +1,91 @@
+[
+  {
+    "name": "/admin shows dashboard for owner",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [{ "method": "sendMessage" }]
+      }
+    ]
+  },
+  {
+    "name": "dashboard shows today's bookings action",
+    "steps": [
+      {
+        "send": { "callback": "admin:dashboard" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          { "method": "editMessageText" },
+          { "method": "sendMessage" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "today's bookings empty state",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [{ "method": "sendMessage" }]
+      },
+      {
+        "send": { "callback": "admin:list_today" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          {
+            "method": "editMessageText",
+            "payload": { "text": "📋 No bookings today. Enjoy a quiet shift!" }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "tables management view",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [{ "method": "sendMessage" }]
+      },
+      {
+        "send": { "callback": "admin:tables" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          { "method": "editMessageText" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "settings view",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [{ "method": "sendMessage" }]
+      },
+      {
+        "send": { "callback": "admin:settings" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          { "method": "editMessageText" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "daily summary shows today and tomorrow",
+    "steps": [
+      {
+        "send": { "text": "/admin" },
+        "expect": [{ "method": "sendMessage" }]
+      },
+      {
+        "send": { "callback": "admin:summary" },
+        "expect": [
+          { "method": "answerCallbackQuery" },
+          { "method": "editMessageText" }
+        ]
+      }
+    ]
+  }
+]
