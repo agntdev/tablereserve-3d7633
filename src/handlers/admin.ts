@@ -238,6 +238,7 @@ composer.callbackQuery(/^admin:booking:/, async (ctx) => {
   const buttons: InlineButton[] = [];
   if (booking.status === "confirmed") {
     buttons.push(
+      inlineButton("✏️ Edit booking", `admin:edit:${booking.code}`),
       inlineButton("❌ Mark no-show", `admin:no_show:${booking.code}`),
       inlineButton("✔️ Mark completed", `admin:complete:${booking.code}`),
     );
